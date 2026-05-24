@@ -109,10 +109,12 @@ export type ScopeExtractorHooks = Pick<
  * Drive the five extraction passes and return a `ParsedFile`.
  *
  * Throws `ScopeTreeInvariantError` (from #912) when the provider emits
- * captures that violate structural scope invariants. The error surfaces
- * upward rather than being silently corrected — a malformed capture set
- * is a bug in the provider's `emitScopeCaptures`, not a data condition
- * to tolerate.
+ * captures that violate structural scope invariants (e.g., overlapping
+ * sibling scopes). When no `@scope.module` capture is present, a
+ * synthetic Module scope is created spanning all captures, and orphan
+ * non-Module scopes are re-parented under it. This enables indexing of
+ * files where tree-sitter produces an ERROR root (e.g., complex .phtml
+ * templates with mixed PHP/HTML/JS).
  */
 export function extract(
   matches: readonly CaptureMatch[],
@@ -124,7 +126,7 @@ export function extract(
 
   // ── Pass 1: build the scope tree ─────────────────────────────────────
   const scopeDrafts = pass1BuildScopes(partitioned.scope, filePath, provider);
-  const moduleScope = ensureModuleScope(scopeDrafts, filePath);
+  const moduleScope = ensureModuleScope(scopeDrafts, filePath, matches);
   // Re-parent orphan drafts (parent === null, non-Module) under the
   // Module scope. Replaces drafts with new ones carrying the correct
   // parent — runs before content passes so bindings/ownedDefs are empty.
@@ -287,25 +289,29 @@ interface ScopeDraft {
   readonly typeBindings: Map<string, TypeRef>;
 }
 
-function ensureModuleScope(scopeDrafts: ScopeDraft[], filePath: string): ScopeDraft {
+function ensureModuleScope(
+  scopeDrafts: ScopeDraft[],
+  filePath: string,
+  allMatches: readonly CaptureMatch[],
+): ScopeDraft {
   const moduleScope = scopeDrafts.find((s) => s.kind === 'Module');
   if (moduleScope !== undefined) return moduleScope;
 
-  // Synthesize a Module scope spanning the full file. Without this,
-  // files whose tree-sitter root is ERROR (complex .phtml templates,
-  // namespace-less PHP scripts) have no Module scope — their captures
-  // exist but positionIndex.atPosition can't assign them to a scope,
-  // so references and declarations are silently dropped.
-  //
-  // The range covers the entire file so positionIndex containment
-  // checks work for top-level references (not just those inside inner
-  // Function/Class scopes).
+  // Synthesize a Module scope spanning all captures in the file.
+  // Computed from ALL captures (scope, declaration, reference, etc.)
+  // so the range covers top-level references that appear after the
+  // last inner scope — not just inner Function/Class scopes.
   let endLine = 0;
   let endCol = 0;
-  for (const d of scopeDrafts) {
-    if (d.range.endLine > endLine || (d.range.endLine === endLine && d.range.endCol > endCol)) {
-      endLine = d.range.endLine;
-      endCol = d.range.endCol;
+  for (const match of allMatches) {
+    for (const capture of Object.values(match)) {
+      if (
+        capture.range.endLine > endLine ||
+        (capture.range.endLine === endLine && capture.range.endCol > endCol)
+      ) {
+        endLine = capture.range.endLine;
+        endCol = capture.range.endCol;
+      }
     }
   }
   const range: Range = { startLine: 0, startCol: 0, endLine, endCol };
