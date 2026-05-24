@@ -175,27 +175,25 @@ function printResults(label: string, results: BenchResult[]) {
 }
 
 describe.skipIf(!BENCH_ENABLED)('PHP pipeline benchmark', () => {
-  it(
-    'scales with file count (workers enabled)',
-    async () => {
-      const scales = [100, 250, 500];
-      const results: BenchResult[] = [];
+  it('scales with file count (workers enabled)', async () => {
+    const scales = [100, 250, 500];
+    const results: BenchResult[] = [];
 
-      for (const fileCount of scales) {
-        const nsLevels = Math.max(2, Math.ceil(Math.sqrt(fileCount / 4)));
-        const result = await runBenchmark(fileCount, nsLevels, 180_000);
-        results.push(result);
-        console.log(`  ${fileCount} files: ${result.elapsedMs}ms, ${result.peakHeapMB}MB heap, ${result.nodeCount} nodes, ${result.edgeCount} edges`);
-      }
+    for (const fileCount of scales) {
+      const nsLevels = Math.max(2, Math.ceil(Math.sqrt(fileCount / 4)));
+      const result = await runBenchmark(fileCount, nsLevels, 180_000);
+      results.push(result);
+      console.log(
+        `  ${fileCount} files: ${result.elapsedMs}ms, ${result.peakHeapMB}MB heap, ${result.nodeCount} nodes, ${result.edgeCount} edges`,
+      );
+    }
 
-      printResults('PHP Pipeline — Workers Enabled', results);
+    printResults('PHP Pipeline — Workers Enabled', results);
 
-      for (let i = 1; i < results.length; i++) {
-        const fileRatio = results[i].fileCount / results[i - 1].fileCount;
-        const timeRatio = results[i].elapsedMs / results[i - 1].elapsedMs;
-        expect(timeRatio / fileRatio).toBeLessThan(3);
-      }
-    },
-    300_000,
-  );
+    for (let i = 1; i < results.length; i++) {
+      const fileRatio = results[i].fileCount / results[i - 1].fileCount;
+      const timeRatio = results[i].elapsedMs / results[i - 1].elapsedMs;
+      expect(timeRatio / fileRatio).toBeLessThan(3);
+    }
+  }, 300_000);
 });

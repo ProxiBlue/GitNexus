@@ -287,10 +287,7 @@ interface ScopeDraft {
   readonly typeBindings: Map<string, TypeRef>;
 }
 
-function ensureModuleScope(
-  scopeDrafts: ScopeDraft[],
-  filePath: string,
-): ScopeDraft {
+function ensureModuleScope(scopeDrafts: ScopeDraft[], filePath: string): ScopeDraft {
   const moduleScope = scopeDrafts.find((s) => s.kind === 'Module');
   if (moduleScope !== undefined) return moduleScope;
 
