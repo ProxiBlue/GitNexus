@@ -240,32 +240,57 @@ export function populatePhpNamespaceSiblings(
     }
   }
 
-  // Step 3b: Inject fully-qualified-name bindings into every PHP file's
-  // Module scope. PHP `\App\Models\User` (leading-backslash FQN) and
-  // `App\Models\User` (already-qualified relative) on a parameter or
-  // typed receiver must resolve to the exact namespace-qualified class
-  // regardless of which simple-name `User` the caller's `use` imports
-  // shadowed. The shared `findClassBindingInScope` scope-chain walk
-  // consumes these augmentations via `lookupBindingsAt`, so adding the
-  // qualified key on every file's module scope routes FQN-receivers to
-  // the right def. Codex PR #1497 review, finding 1.
+  // Step 3b: Inject fully-qualified-name bindings into PHP files' Module
+  // scopes, but ONLY for FQNs each file actually references.
   //
-  // Cost: O(PHP files × class-like defs in the workspace) augmentation
-  // entries. Bounded and acceptable in practice — typical PHP projects
-  // have hundreds of files and classes, not tens of thousands.
+  // The original code injected every FQN into every file's Module scope
+  // — O(files × classDefs). For large vendor trees (16K files × 5K+
+  // classes) this creates 80M+ augmentation entries (~32GB heap).
+  // See: https://github.com/abhigyanpatwari/GitNexus/issues/1803
+  //
+  // Instead: build a FQN→def lookup once, then for each file only inject
+  // FQNs that appear in its reference sites, type bindings, or imports.
+  // This is O(files × refsPerFile) — bounded by actual code usage.
+  const fqnDefs = new Map<string, SymbolDefinition[]>();
+  for (const [ns, bucket] of buckets) {
+    if (ns === '') continue;
+    for (const def of bucket.classDefs) {
+      const q = def.qualifiedName ?? '';
+      const simpleName = q.includes('\\') ? q.slice(q.lastIndexOf('\\') + 1) : q;
+      if (simpleName === '') continue;
+      const fqn = `${ns}\\${simpleName}`;
+      let arr = fqnDefs.get(fqn);
+      if (!arr) { arr = []; fqnDefs.set(fqn, arr); }
+      arr.push(def);
+    }
+  }
+
   for (const parsed of parsedFiles) {
     const moduleScope = parsed.scopes.find((s) => s.kind === 'Module');
     if (moduleScope === undefined) continue;
     const moduleScopeId = moduleScope.id;
 
-    for (const [ns, bucket] of buckets) {
-      if (ns === '') continue; // global-namespace classes have no qualified form to register
-      for (const def of bucket.classDefs) {
-        const q = def.qualifiedName ?? '';
-        const simpleName = q.includes('\\') ? q.slice(q.lastIndexOf('\\') + 1) : q;
-        if (simpleName === '') continue;
-        const fqn = `${ns}\\${simpleName}`;
-        const arr = getAugmentationBucket(augmentations, moduleScopeId, fqn);
+    // Collect FQN-like names from reference sites and type bindings
+    const referencedFqns = new Set<string>();
+    for (const ref of parsed.referenceSites) {
+      if (ref.name && ref.name.includes('\\')) referencedFqns.add(ref.name);
+    }
+    for (const scope of parsed.scopes) {
+      for (const [name] of scope.typeBindings) {
+        if (name.includes('\\')) referencedFqns.add(name);
+      }
+    }
+    for (const imp of parsed.parsedImports) {
+      if (imp.targetRaw && imp.targetRaw.includes('\\')) referencedFqns.add(imp.targetRaw);
+    }
+
+    // Only inject augmentations for FQNs this file actually uses
+    for (const name of referencedFqns) {
+      const cleanName = name.startsWith('\\') ? name.slice(1) : name;
+      const defs = fqnDefs.get(cleanName);
+      if (!defs) continue;
+      for (const def of defs) {
+        const arr = getAugmentationBucket(augmentations, moduleScopeId, cleanName);
         if (arr.some((b) => b.def.nodeId === def.nodeId)) continue;
         arr.push({ def, origin: 'namespace' });
       }
@@ -281,6 +306,13 @@ export function populatePhpNamespaceSiblings(
   //
   // Additionally, mirror from files that are imported via `use` (different
   // namespace) so return types from dependencies are chain-followable too.
+  //
+  // Uses a Map for O(1) file lookup instead of parsedFiles.find() which
+  // was O(n) per call — O(n²) total for 16K files.
+  // See: https://github.com/abhigyanpatwari/GitNexus/issues/1803
+  const parsedByPath = new Map<string, ParsedFile>();
+  for (const p of parsedFiles) parsedByPath.set(p.filePath, p);
+
   for (const parsed of parsedFiles) {
     const moduleScope = parsed.scopes.find((s) => s.kind === 'Module');
     if (moduleScope === undefined) continue;
@@ -322,7 +354,7 @@ export function populatePhpNamespaceSiblings(
 
     // Mirror return-type bindings from accessible files.
     for (const srcFilePath of accessibleFiles) {
-      const srcParsed = parsedFiles.find((p) => p.filePath === srcFilePath);
+      const srcParsed = parsedByPath.get(srcFilePath);
       if (srcParsed === undefined) continue;
       const srcModuleScope = srcParsed.scopes.find((s) => s.kind === 'Module');
       if (srcModuleScope === undefined) continue;
